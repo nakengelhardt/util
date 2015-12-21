@@ -369,9 +369,6 @@ class VirtmemWrapper(GenericRiffa):
 	def __init__(self, combined_interface_rx, combined_interface_tx, c_pci_data_width=32, wordsize=32, ptrsize=64, drive_clocks=True):
 		GenericRiffa.__init__(self, combined_interface_rx=combined_interface_rx, combined_interface_tx=combined_interface_tx, c_pci_data_width=c_pci_data_width, drive_clocks=drive_clocks)
 
-		if drive_clocks:
-			self.clock_domains.cd_sys = ClockDomain()
-
 		rx0, tx0 = self.get_channel(0)
 		rx1, tx1 = self.get_channel(1)
 		self.submodules.virtmem = Virtmem(rx0, tx0, rx1, tx1, c_pci_data_width=c_pci_data_width, wordsize=wordsize, ptrsize=ptrsize)
