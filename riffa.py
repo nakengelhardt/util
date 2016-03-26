@@ -89,7 +89,7 @@ def gen_channel_write(channel, words):
     yield channel.len.eq(nwords)
     yield channel.off.eq(0)
     nsent = 0
-    while not sim.rd(channel.ack):
+    while not (yield channel.ack):
         yield
     while nsent < nwords:
         data = pack(words[nsent:min(nsent+channelwidth, nwords)])
