@@ -105,7 +105,11 @@ class PicoPlatform:
         self.hmc_size_width = hmc_size_width
         self.hmc_data_width = hmc_data_width
 
-
+    def getExtraClk(self):
+        if not hasattr(self, "extra_clk"):
+            self.extra_clk = Signal(name_override="extra_clk")
+            self.ios |= {self.extra_clk}
+        return self.extra_clk
 
     def getBus(self):
         return self.bus
@@ -144,7 +148,7 @@ class PicoPlatform:
             self.hmc_rst = Signal(name_override="hmc_rst")
             self.hmc_trained = Signal(name_override="hmc_trained")
             self.ios |= {self.hmc_clk_rx, self.hmc_clk_tx, self.hmc_rst, self.hmc_trained}
-            for i in range(10):
+            for i in range(9):
                 port = HMCPort(addr_width=self.hmc_addr_width, size_width=self.hmc_size_width, data_width=self.hmc_data_width)
                 for name in [x[0] for x in _hmc_port_layout]:
                     getattr(port, name).name_override = "hmc_{}_p{}".format(name, i)
