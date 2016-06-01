@@ -1,6 +1,9 @@
 from migen import *
 from migen.genlib.record import *
 
+import random
+import logging
+
 def pack(words):
     data = 0
     for i, word in enumerate(words):
@@ -86,6 +89,39 @@ _hmc_port_layout = [
 class HMCPort(Record):
     def __init__(self, **kwargs):
         Record.__init__(self, set_layout_parameters(_hmc_port_layout, **kwargs))
+
+    @passive
+    def gen_responses(self, data):
+        logger = logging.getLogger('simulation.pico')
+        inflight = []
+        while True:
+            if len(inflight) < 64:
+                (yield self.cmd_ready.eq(1))
+            else:
+                (yield self.cmd_ready.eq(0))
+
+            if inflight and random.choice([True, False]):
+                tag, val = inflight[0]#random.choice(inflight)
+                inflight.remove((tag, val))
+                (yield self.rd_data.eq(val))
+                (yield self.rd_data_tag.eq(tag))
+                (yield self.rd_data_valid.eq(1))
+                logger.debug("HMC reply: tag={} data=0x{:X}".format(tag, val))
+            else:
+                (yield self.rd_data_valid.eq(0))
+
+            yield
+
+            if (yield self.cmd_ready) and (yield self.cmd_valid):
+                addr = (yield self.addr)
+                size = (yield self.size)
+                tag = (yield self.tag)
+                logger.debug("HMC request: tag={} addr=0x{:X}".format(tag, addr))
+                assert addr % 16 == 0
+                assert size == 1
+                idx = addr//4
+                val = pack(data[idx:idx+4])
+                inflight.append((tag, val))
 
 
 class PicoPlatform:
