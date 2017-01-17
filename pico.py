@@ -93,6 +93,8 @@ class HMCPort(Record):
     @passive
     def gen_responses(self, data):
         logger = logging.getLogger('simulation.pico')
+        # logger.setLevel(logging.INFO)
+        logger.debug("start HMC sim")
         inflight = []
         while True:
             if len(inflight) < 64:
@@ -101,7 +103,7 @@ class HMCPort(Record):
                 (yield self.cmd_ready.eq(0))
 
             if inflight and random.choice([True, False]):
-                tag, val = inflight[0]#random.choice(inflight)
+                tag, val = random.choice(inflight)
                 inflight.remove((tag, val))
                 (yield self.rd_data.eq(val))
                 (yield self.rd_data_tag.eq(tag))
