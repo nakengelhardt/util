@@ -1,5 +1,6 @@
 from migen import *
 from migen.genlib.record import *
+from migen.genlib.roundrobin import *
 
 import random
 import logging
@@ -89,6 +90,7 @@ _hmc_port_layout = [
 class HMCPort(Record):
     def __init__(self, **kwargs):
         Record.__init__(self, set_layout_parameters(_hmc_port_layout, **kwargs))
+        self.effective_max_tag_size = 6
 
     @passive
     def gen_responses(self, data):
@@ -125,9 +127,67 @@ class HMCPort(Record):
                 val = pack(data[idx:idx+4])
                 inflight.append((tag, val))
 
+class HMCPortMultiplexer(Module):
+    def __init__(self, out_port, in_ports):
+        if len(in_ports) == 0:
+            return
+        if len(in_ports) == 1:
+            self.comb += in_ports[0].connect(out_port)
+            return
 
-class PicoPlatform:
-    def __init__(self, bus_width=32, stream_width=128, hmc_addr_width=34, hmc_size_width=4, hmc_data_width=128):
+        ## serve requests in roundrobin fashion
+
+        # each port gets a subset of tags to use
+        mux_bits = bits_for(len(in_ports)-1)
+        effective_max_tag_size = out_port.effective_max_tag_size - mux_bits
+        for port in in_ports:
+            port.effective_max_tag_size = effective_max_tag_size
+
+            # ("cmd_valid", 1, DIR_M_TO_S),
+            # ("cmd_ready", 1, DIR_S_TO_M),
+            # ("cmd", 4, DIR_M_TO_S),
+            # ("addr", "addr_width", DIR_M_TO_S),
+            # ("size", "size_width", DIR_M_TO_S),
+            # ("tag", 6, DIR_M_TO_S),
+
+        array_cmd_valid = Array(port.cmd_valid for port in in_ports)
+        array_cmd_ready = Array(port.cmd_ready for port in in_ports)
+        array_cmd = Array(port.cmd for port in in_ports)
+        array_addr = Array(port.addr for port in in_ports)
+        array_size = Array(port.size for port in in_ports)
+        array_tag = Array(port.tag for port in in_ports)
+
+        self.submodules.roundrobin = RoundRobin(len(in_ports), switch_policy=SP_CE)
+
+        self.comb += [
+            [self.roundrobin.request[i].eq(port.cmd_valid) for i, port in enumerate(in_ports)],
+            self.roundrobin.ce.eq(out_port.cmd_ready),
+            out_port.cmd_valid.eq(array_cmd_valid[self.roundrobin.grant]),
+            array_cmd_ready[self.roundrobin.grant].eq(out_port.cmd_ready),
+            out_port.cmd.eq(array_cmd[self.roundrobin.grant]),
+            out_port.addr.eq(array_addr[self.roundrobin.grant]),
+            out_port.size.eq(array_size[self.roundrobin.grant]),
+            out_port.tag.eq(Cat(array_tag[self.roundrobin.grant][0:effective_max_tag_size], self.roundrobin.grant))
+        ]
+
+        ## distribute responses
+
+        # ("rd_data", "data_width", DIR_S_TO_M),
+        # ("rd_data_tag", 6, DIR_S_TO_M),
+        # ("rd_data_valid", 1, DIR_S_TO_M),
+        # ("dinv", 1, DIR_S_TO_M)
+
+        array_data_valid = Array(port.rd_data_valid for port in in_ports)
+
+        self.comb += [
+            [port.rd_data.eq(out_port.rd_data) for port in in_ports],
+            [port.rd_data_tag.eq(out_port.rd_data_tag[:effective_max_tag_size]) for port in in_ports],
+            array_data_valid[out_port.rd_data_tag[effective_max_tag_size:]].eq(out_port.rd_data_valid),
+            [port.dinv.eq(out_port.dinv) for port in in_ports]
+        ]
+
+class PicoPlatform(Module):
+    def __init__(self, num_hmc_ports_required, bus_width=32, stream_width=128, hmc_addr_width=34, hmc_size_width=4, hmc_data_width=128):
         self.ios = set()
         self.bus = PicoBusInterface(data_width=bus_width)
         for name in [x[0] for x in _bus_layout]:
@@ -138,10 +198,28 @@ class PicoPlatform:
         self.ios |= {self.bus_clk, self.bus_rst}
         self.streams = []
         self.stream_width = stream_width
-        self.HMCports = []
         self.hmc_addr_width = hmc_addr_width
         self.hmc_size_width = hmc_size_width
         self.hmc_data_width = hmc_data_width
+        if num_hmc_ports_required > 0:
+            self.hmc_clk_rx = Signal(name_override="hmc_rx_clk")
+            self.hmc_clk_tx = Signal(name_override="hmc_tx_clk")
+            self.hmc_rst = Signal(name_override="hmc_rst")
+            self.hmc_trained = Signal(name_override="hmc_trained")
+            self.ios |= {self.hmc_clk_rx, self.hmc_clk_tx, self.hmc_rst, self.hmc_trained}
+            self.picoHMCports = []
+            for i in range(9):
+                port = HMCPort(addr_width=self.hmc_addr_width, size_width=self.hmc_size_width, data_width=self.hmc_data_width)
+                for name in [x[0] for x in _hmc_port_layout]:
+                    getattr(port, name).name_override = "hmc_{}_p{}".format(name, i)
+                self.ios |= {getattr(port, name) for name in [x[0] for x in _hmc_port_layout]}
+                self.picoHMCports.append(port)
+            self.HMCports = [HMCPort(addr_width=self.hmc_addr_width, size_width=self.hmc_size_width, data_width=self.hmc_data_width) for _ in range(num_hmc_ports_required)]
+            portgroups = [list() for _ in range(9)]
+            for i,port in enumerate(self.HMCports):
+                portgroups[i % 9].append(port)
+            for i in range(9):
+                self.submodules += HMCPortMultiplexer(out_port=self.picoHMCports[i], in_ports=portgroups[i])
 
     def getExtraClk(self):
         if not hasattr(self, "extra_clk"):
@@ -179,28 +257,14 @@ class PicoPlatform:
         self.ensureStreamClk()
         return self.stream_clk, self.stream_rst
 
-    def ensureHMCClk(self):
-        if not hasattr(self, "hmc_rst"):
-            self.hmc_clk_rx = Signal(name_override="hmc_rx_clk")
-            self.hmc_clk_tx = Signal(name_override="hmc_tx_clk")
-            self.hmc_rst = Signal(name_override="hmc_rst")
-            self.hmc_trained = Signal(name_override="hmc_trained")
-            self.ios |= {self.hmc_clk_rx, self.hmc_clk_tx, self.hmc_rst, self.hmc_trained}
-            for i in range(9):
-                port = HMCPort(addr_width=self.hmc_addr_width, size_width=self.hmc_size_width, data_width=self.hmc_data_width)
-                for name in [x[0] for x in _hmc_port_layout]:
-                    getattr(port, name).name_override = "hmc_{}_p{}".format(name, i)
-                self.ios |= {getattr(port, name) for name in [x[0] for x in _hmc_port_layout]}
-                self.HMCports.append(port)
-
     def getHMCPort(self, i):
-        self.ensureHMCClk()
         return self.HMCports[i]
 
     def getHMCClkEtc(self):
-        self.ensureHMCClk()
         return self.hmc_clk_rx, self.hmc_clk_tx, self.hmc_rst, self.hmc_trained
-
 
     def get_ios(self):
         return self.ios
+
+    def getSimGenerators(self, data):
+        return [port.gen_responses(data) for port in self.picoHMCports]
