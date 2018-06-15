@@ -108,11 +108,12 @@ class HMCPort(Record):
         logger = logging.getLogger('simulation.pico')
         # logger.setLevel(logging.INFO)
         logger.debug("start HMC sim")
+        num_cycles = 0
         inflight = []
         cmd_inflight_w = []
         data_inflight_w = []
         while True:
-            if len(inflight) < 64:
+            if len(inflight) < 64 and random.choice([True, False]):
                 (yield self.cmd_ready.eq(1))
             else:
                 (yield self.cmd_ready.eq(0))
@@ -148,19 +149,20 @@ class HMCPort(Record):
                 (yield self.rd_data.eq(val))
                 (yield self.rd_data_tag.eq(tag))
                 (yield self.rd_data_valid.eq(1))
-                logger.debug("HMC reply: tag={} data=0x{:X}".format(tag, val))
+                logger.debug("{}: HMC reply: tag={} data=0x{:X}".format(num_cycles, tag, val))
             else:
                 (yield self.rd_data_valid.eq(0))
 
 
             yield
+            num_cycles += 1
 
             if (yield self.cmd_ready) and (yield self.cmd_valid):
                 addr = (yield self.addr)
                 size = (yield self.size)
                 tag = (yield self.tag)
                 cmd = (yield self.cmd)
-                logger.debug("HMC request: {} tag={} addr=0x{:X}".format("read" if cmd == HMC_CMD_RD else "write", tag, addr))
+                logger.debug("{}: HMC request: {} tag={} addr=0x{:X}".format(num_cycles, "read" if cmd == HMC_CMD_RD else "write", tag, addr))
                 assert addr % 16 == 0
                 assert size == 1
                 idx = addr//4
@@ -252,19 +254,22 @@ class PicoPlatform(Module):
         self.hmc_addr_width = hmc_addr_width
         self.hmc_size_width = hmc_size_width
         self.hmc_data_width = hmc_data_width
-        if num_hmc_ports_required > 0:
-            self.hmc_clk_rx = Signal(name_override="hmc_rx_clk")
-            self.hmc_clk_tx = Signal(name_override="hmc_tx_clk")
-            self.hmc_rst = Signal(name_override="hmc_rst")
-            self.hmc_trained = Signal(name_override="hmc_trained")
-            self.ios |= {self.hmc_clk_rx, self.hmc_clk_tx, self.hmc_rst, self.hmc_trained}
-            self.picoHMCports = []
-            for i in range(9):
-                port = HMCPort(addr_width=self.hmc_addr_width, size_width=self.hmc_size_width, data_width=self.hmc_data_width)
-                for name in [x[0] for x in _hmc_port_layout]:
-                    getattr(port, name).name_override = "hmc_{}_p{}".format(name, i)
-                self.ios |= {getattr(port, name) for name in [x[0] for x in _hmc_port_layout]}
-                self.picoHMCports.append(port)
+        self.hmc_clk_rx = Signal(name_override="hmc_rx_clk")
+        self.hmc_clk_tx = Signal(name_override="hmc_tx_clk")
+        self.hmc_rst = Signal(name_override="hmc_rst")
+        self.hmc_trained = Signal(name_override="hmc_trained")
+        self.ios |= {self.hmc_clk_rx, self.hmc_clk_tx, self.hmc_rst, self.hmc_trained}
+        self.picoHMCports = []
+        for i in range(9):
+            port = HMCPort(addr_width=self.hmc_addr_width, size_width=self.hmc_size_width, data_width=self.hmc_data_width)
+            for name in [x[0] for x in _hmc_port_layout]:
+                getattr(port, name).name_override = "hmc_{}_p{}".format(name, i)
+            self.ios |= {getattr(port, name) for name in [x[0] for x in _hmc_port_layout]}
+            self.picoHMCports.append(port)
+
+        if num_hmc_ports_required <= 9:
+            self.HMCports = self.picoHMCports
+        else:
             self.HMCports = [HMCPort(addr_width=self.hmc_addr_width, size_width=self.hmc_size_width, data_width=self.hmc_data_width) for _ in range(num_hmc_ports_required)]
             portgroups = [list() for _ in range(9)]
             for i,port in enumerate(self.HMCports):
