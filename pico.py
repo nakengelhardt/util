@@ -17,6 +17,12 @@ def unpack(data, n):
         words.append((data >> i*32) & 0xFFFFFFFF)
     return words
 
+def repack(data, n):
+    packed_data = []
+    for i in range(0, len(data), n):
+        packed_data[i] = pack(data[i:min(i+n, len(data))])
+    return packed_data
+
 _stream_layout = [
     ("valid", 1, DIR_M_TO_S),
     ("rdy", 1, DIR_S_TO_M),
@@ -87,6 +93,10 @@ _hmc_port_layout = [
     ("dinv", 1, DIR_S_TO_M)
 ]
 
+HMC_CMD_RD = 0b0000 # read
+HMC_CMD_WR = 0b1001 # posted write
+HMC_CMD_WR_NP = 0b0001 # non-posted write
+
 class HMCPort(Record):
     def __init__(self, **kwargs):
         Record.__init__(self, set_layout_parameters(_hmc_port_layout, **kwargs))
@@ -94,19 +104,47 @@ class HMCPort(Record):
 
     @passive
     def gen_responses(self, data):
+        packed_data = repack(data, 4)
         logger = logging.getLogger('simulation.pico')
         # logger.setLevel(logging.INFO)
         logger.debug("start HMC sim")
         inflight = []
+        cmd_inflight_w = []
+        data_inflight_w = []
         while True:
             if len(inflight) < 64:
                 (yield self.cmd_ready.eq(1))
             else:
                 (yield self.cmd_ready.eq(0))
 
-            if inflight and random.choice([True, False]):
-                tag, val = random.choice(inflight)
-                inflight.remove((tag, val))
+            if len(cmd_inflight_w) < len(data_inflight_w):
+                (yield self.wr_data_ready.eq(0))
+            else:
+                (yield self.wr_data_ready.eq(1))
+
+            case = random.choice([0,1,2])
+
+            if case == 0 and cmd_inflight_w:
+                i = random.randrange(len(cmd_inflight_w))
+                if i < len(data_inflight_w):
+                    tag, idx = cmd_inflight_w[i]
+                    del cmd_inflight_w[i]
+                    val = data_inflight_w[i]
+                    del data_inflight_w[i]
+                    if idx >= len(packed_data):
+                        packed_data.extend(0 for _ in range(len(packed_data), idx+1))
+                    packed_data[idx] = val
+                    if tag >=0:
+                        (yield self.rd_data_tag.eq(tag))
+                        (yield self.rd_data_valid.eq(1))
+                    else:
+                        (yield self.rd_data_valid.eq(0))
+                else:
+                    (yield self.rd_data_valid.eq(0))
+            elif case == 1 and inflight:
+                tag, idx = random.choice(inflight)
+                val = packed_data[idx]
+                inflight.remove((tag, idx))
                 (yield self.rd_data.eq(val))
                 (yield self.rd_data_tag.eq(tag))
                 (yield self.rd_data_valid.eq(1))
@@ -114,18 +152,31 @@ class HMCPort(Record):
             else:
                 (yield self.rd_data_valid.eq(0))
 
+
             yield
 
             if (yield self.cmd_ready) and (yield self.cmd_valid):
                 addr = (yield self.addr)
                 size = (yield self.size)
                 tag = (yield self.tag)
-                logger.debug("HMC request: tag={} addr=0x{:X}".format(tag, addr))
+                cmd = (yield self.cmd)
+                logger.debug("HMC request: {} tag={} addr=0x{:X}".format("read" if cmd == HMC_CMD_RD else "write", tag, addr))
                 assert addr % 16 == 0
                 assert size == 1
                 idx = addr//4
-                val = pack(data[idx:idx+4])
-                inflight.append((tag, val))
+
+                if cmd == HMC_CMD_RD:
+                    inflight.append((tag, idx))
+                elif cmd == HMC_CMD_WR:
+                    cmd_inflight_w.append((-1, idx))
+                elif cmd == HMC_CMD_WR_NP:
+                    cmd_inflight_w.append((tag, idx))
+                else:
+                    raise NotImplementedError
+
+            if (yield self.wr_data_ready) and (yield self.wr_data_valid):
+                val = (yield self.wr_data)
+                data_inflight_w.append(val)
 
 class HMCPortMultiplexer(Module):
     def __init__(self, out_port, in_ports):
