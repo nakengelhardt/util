@@ -1,6 +1,7 @@
 from migen import *
 from migen.genlib.record import *
 from migen.genlib.roundrobin import *
+from migen.genlib.fifo import *
 
 import random
 import logging
@@ -56,12 +57,14 @@ class PicoStreamInterface(Record):
         yield channel.rdy.eq(1)
         while len(words) < nwords:
             if (yield channel.valid):
-                data = (yield channel.data)
-                words.extend(unpack(data, min(channelwidth, nwords-len(words))))
+                data = unpack((yield channel.data), min(channelwidth, nwords-len(words)))
+                for i, word in enumerate(reversed(data)):
+                    print("{:08x}".format(word), end='\n' if i % 4 == 3 else '_')
+                words.extend(data)
                 if len(words) >= nwords:
                     yield channel.rdy.eq(0)
             yield
-        print(words)
+        return words
 
 _bus_layout =[
     ("PicoAddr", "data_width", DIR_M_TO_S),
@@ -102,18 +105,19 @@ class HMCPort(Record):
         Record.__init__(self, set_layout_parameters(_hmc_port_layout, **kwargs))
         self.effective_max_tag_size = 6
 
+
     @passive
-    def gen_responses(self, data):
-        packed_data = repack(data, 4)
+    def gen_responses(self):
+
         logger = logging.getLogger('simulation.pico')
-        # logger.setLevel(logging.INFO)
+        logger.setLevel(logging.INFO)
         logger.debug("start HMC sim")
         num_cycles = 0
         inflight = []
         cmd_inflight_w = []
         data_inflight_w = []
         while True:
-            if len(inflight) < 64 and random.choice([True, False]):
+            if random.choice([True, False]):
                 (yield self.cmd_ready.eq(1))
             else:
                 (yield self.cmd_ready.eq(0))
@@ -132,10 +136,10 @@ class HMCPort(Record):
                     del cmd_inflight_w[i]
                     val = data_inflight_w[i]
                     del data_inflight_w[i]
-                    if idx >= len(packed_data):
-                        packed_data.extend(0 for _ in range(len(packed_data), idx+1))
-                    packed_data[idx] = val
-                    if tag >=0:
+                    if idx >= len(self.hmc_data):
+                        self.hmc_data.extend(0 for _ in range(len(self.hmc_data), idx+1))
+                    self.hmc_data[idx] = val
+                    if tag >= 0:
                         (yield self.rd_data_tag.eq(tag))
                         (yield self.rd_data_valid.eq(1))
                     else:
@@ -144,7 +148,7 @@ class HMCPort(Record):
                     (yield self.rd_data_valid.eq(0))
             elif case == 1 and inflight:
                 tag, idx = random.choice(inflight)
-                val = packed_data[idx]
+                val = self.hmc_data[idx]
                 inflight.remove((tag, idx))
                 (yield self.rd_data.eq(val))
                 (yield self.rd_data_tag.eq(tag))
@@ -239,61 +243,142 @@ class HMCPortMultiplexer(Module):
             [port.dinv.eq(out_port.dinv) for port in in_ports]
         ]
 
+class HMCPortWriteUnifier(Module):
+    def __init__(self, pico_port):
+        usr_port_layout = [
+            ("cmd_valid", 1),
+            ("cmd_ready", 1),
+            ("cmd", 4),
+            ("addr", len(pico_port.addr)),
+            ("size", len(pico_port.size)),
+            ("tag", 6),
+            ("wr_data", len(pico_port.wr_data)),
+            ("rd_data", len(pico_port.rd_data)),
+            ("rd_data_tag", 6),
+            ("rd_data_valid", 1)
+        ]
+        for name, length in usr_port_layout:
+            setattr(self, name, Signal(length, name_override=name))
+        self.effective_max_tag_size = pico_port.effective_max_tag_size
+
+        cmd_layout = [
+            ("cmd", len(pico_port.cmd)),
+            ("addr", len(pico_port.addr)),
+            ("size", len(pico_port.size)),
+            ("tag", len(pico_port.tag))
+        ]
+        self.submodules.cmd_fifo = SyncFIFO(width=layout_len(cmd_layout), depth=8)
+        self.submodules.data_fifo = SyncFIFO(width=len(pico_port.wr_data), depth=8)
+        cmd_fifo_in = Record(cmd_layout)
+        cmd_fifo_out = Record(cmd_layout)
+
+        self.comb += [
+            # cmd fifo split din/dout into fields
+            self.cmd_fifo.din.eq(cmd_fifo_in.raw_bits()),
+            cmd_fifo_out.raw_bits().eq(self.cmd_fifo.dout),
+            # inputs
+            cmd_fifo_in.cmd.eq(self.cmd),
+            cmd_fifo_in.addr.eq(self.addr),
+            cmd_fifo_in.size.eq(self.size),
+            cmd_fifo_in.tag.eq(self.tag),
+            self.data_fifo.din.eq(self.wr_data),
+            # input flow control
+            self.cmd_ready.eq(self.cmd_fifo.writable & self.data_fifo.writable),
+            self.cmd_fifo.we.eq(self.cmd_ready & self.cmd_valid),
+            self.data_fifo.we.eq(self.cmd_ready & self.cmd_valid & (self.cmd != HMC_CMD_RD)),
+            # output cmd
+            pico_port.cmd.eq(cmd_fifo_out.cmd),
+            pico_port.addr.eq(cmd_fifo_out.addr),
+            pico_port.size.eq(cmd_fifo_out.size),
+            pico_port.tag.eq(cmd_fifo_out.tag),
+            pico_port.cmd_valid.eq(self.cmd_fifo.readable),
+            self.cmd_fifo.re.eq(pico_port.cmd_ready),
+            # output data
+            pico_port.wr_data.eq(self.data_fifo.dout),
+            pico_port.wr_data_valid.eq(self.data_fifo.readable),
+            self.data_fifo.re.eq(pico_port.wr_data_ready),
+            # connect read data
+            self.rd_data.eq(pico_port.rd_data),
+            self.rd_data_tag.eq(pico_port.rd_data_tag),
+            self.rd_data_valid.eq(pico_port.rd_data_valid)
+        ]
+
 class PicoPlatform(Module):
-    def __init__(self, num_hmc_ports_required, bus_width=32, stream_width=128, hmc_addr_width=34, hmc_size_width=4, hmc_data_width=128):
+    def __init__(self, num_hmc_ports_required, bus_width=32, stream_width=128, hmc_addr_width=34, hmc_size_width=4, hmc_data_width=128, init=None):
         self.ios = set()
-        self.bus = PicoBusInterface(data_width=bus_width)
-        for name in [x[0] for x in _bus_layout]:
-            getattr(self.bus, name).name_override = name
-        self.ios |= {getattr(self.bus, name) for name in [x[0] for x in _bus_layout]}
-        self.bus_clk = Signal(name_override="PicoClk")
-        self.bus_rst = Signal(name_override="PicoRst")
-        self.ios |= {self.bus_clk, self.bus_rst}
         self.streams = []
         self.stream_width = stream_width
+        self.bus_width = bus_width
         self.hmc_addr_width = hmc_addr_width
         self.hmc_size_width = hmc_size_width
         self.hmc_data_width = hmc_data_width
-        self.hmc_clk_rx = Signal(name_override="hmc_rx_clk")
-        self.hmc_clk_tx = Signal(name_override="hmc_tx_clk")
-        self.hmc_rst = Signal(name_override="hmc_rst")
-        self.hmc_trained = Signal(name_override="hmc_trained")
-        self.ios |= {self.hmc_clk_rx, self.hmc_clk_tx, self.hmc_rst, self.hmc_trained}
-        self.picoHMCports = []
-        for i in range(9):
-            port = HMCPort(addr_width=self.hmc_addr_width, size_width=self.hmc_size_width, data_width=self.hmc_data_width)
-            for name in [x[0] for x in _hmc_port_layout]:
-                getattr(port, name).name_override = "hmc_{}_p{}".format(name, i)
-            self.ios |= {getattr(port, name) for name in [x[0] for x in _hmc_port_layout]}
-            self.picoHMCports.append(port)
-
-        if num_hmc_ports_required <= 9:
-            self.HMCports = self.picoHMCports
-        else:
-            self.HMCports = [HMCPort(addr_width=self.hmc_addr_width, size_width=self.hmc_size_width, data_width=self.hmc_data_width) for _ in range(num_hmc_ports_required)]
-            portgroups = [list() for _ in range(9)]
-            for i,port in enumerate(self.HMCports):
-                portgroups[i % 9].append(port)
+        if num_hmc_ports_required > 0:
+            self.clock_domains.cd_sys = ClockDomain()
+            self.hmc_clk_rx = Signal(name_override="hmc_rx_clk")
+            self.cd_sys.clk.name_override = "hmc_tx_clk"
+            self.cd_sys.rst.name_override = "hmc_rst"
+            self.hmc_trained = Signal(name_override="hmc_trained", reset=1)
+            self.ios |= {self.hmc_clk_rx, self.cd_sys.clk, self.cd_sys.rst, self.hmc_trained}
+            self.picoHMCports = []
             for i in range(9):
-                self.submodules += HMCPortMultiplexer(out_port=self.picoHMCports[i], in_ports=portgroups[i])
+                port = HMCPort(addr_width=self.hmc_addr_width, size_width=self.hmc_size_width, data_width=self.hmc_data_width)
+                for name in [x[0] for x in _hmc_port_layout]:
+                    getattr(port, name).name_override = "hmc_{}_p{}".format(name, i)
+                self.ios |= {getattr(port, name) for name in [x[0] for x in _hmc_port_layout]}
+                self.picoHMCports.append(port)
+                self.comb += port.clk.eq(self.cd_sys.clk)
+                if i >= num_hmc_ports_required:
+                    for field, _, dir in _hmc_port_layout:
+                        if field != "clk" and dir == DIR_M_TO_S:
+                            s = getattr(port, field)
+                            self.comb += s.eq(0)
+
+            if num_hmc_ports_required <= 9:
+                self.HMCports = self.picoHMCports
+            else:
+                self.HMCports = [HMCPort(addr_width=self.hmc_addr_width, size_width=self.hmc_size_width, data_width=self.hmc_data_width) for _ in range(num_hmc_ports_required)]
+                portgroups = [list() for _ in range(9)]
+                for i,port in enumerate(self.HMCports):
+                    portgroups[i % 9].append(port)
+                for i in range(9):
+                    self.submodules += HMCPortMultiplexer(out_port=self.picoHMCports[i], in_ports=portgroups[i])
+
+            self.hmc_data = repack(init, 4) if init else []
+            for port in self.HMCports:
+                port.hmc_data = self.hmc_data
+
+    def ensureStreamClk(self):
+        if not hasattr(self, "cd_stream"):
+            self.clock_domains.cd_stream = ClockDomain()
+            self.cd_stream.clk.name_override = "clk"
+            self.cd_stream.rst.name_override = "rst"
+            self.ios |= {self.cd_stream.clk, self.cd_stream.rst}
+
+    def ensureBus(self):
+        if not hasattr(self, "cd_bus"):
+            self.bus = PicoBusInterface(data_width=self.bus_width)
+            for name in [x[0] for x in _bus_layout]:
+                getattr(self.bus, name).name_override = name
+            self.ios |= {getattr(self.bus, name) for name in [x[0] for x in _bus_layout]}
+            self.clock_domains.cd_bus = ClockDomain()
+            self.cd_bus.clk.name_override = "PicoClk"
+            self.cd_bus.rst.name_override = "PicoRst"
+            self.ios |= {self.cd_bus.clk, self.cd_bus.rst}
 
     def getExtraClk(self):
         if not hasattr(self, "extra_clk"):
-            self.extra_clk = Signal(name_override="extra_clk")
-            self.ios |= {self.extra_clk}
-        return self.extra_clk
+            self.clock_domains.cd_extra = ClockDomain(reset_less=True)
+            self.cd_extra.clk.name_override = "extra_clk"
+            self.ios |= {self.cd_extra.clk}
+        return self.cd_extra
 
     def getBus(self):
+        self.ensureBus()
         return self.bus
 
-    def getBusClkRst(self):
-        return self.bus_clk, self.bus_rst
-
-    def ensureStreamClk(self):
-        if not hasattr(self, "stream_clk"):
-            self.stream_clk = Signal(name_override="clk")
-            self.stream_rst = Signal(name_override="rst")
-            self.ios |= {self.stream_clk, self.stream_rst}
+    def getBusClk(self):
+        self.ensureBus()
+        return self.cd_bus
 
     def getStreamPair(self):
         self.ensureStreamClk()
@@ -311,16 +396,20 @@ class PicoPlatform(Module):
 
     def getStreamClkRst(self):
         self.ensureStreamClk()
-        return self.stream_clk, self.stream_rst
+        return self.cd_stream
 
     def getHMCPort(self, i):
         return self.HMCports[i]
 
     def getHMCClkEtc(self):
-        return self.hmc_clk_rx, self.hmc_clk_tx, self.hmc_rst, self.hmc_trained
+        return self.hmc_clk_rx, self.cd_sys.clk, self.cd_sys.rst, self.hmc_trained
 
     def get_ios(self):
         return self.ios
 
-    def getSimGenerators(self, data):
-        return [port.gen_responses(data) for port in self.picoHMCports]
+    def getSimGenerators(self):
+        if hasattr(self, "cd_sys"):
+            generators = {"sys": [port.gen_responses() for port in self.picoHMCports]}
+        else:
+            generators = dict()
+        return generators
