@@ -313,39 +313,42 @@ class PicoPlatform(Module):
         self.hmc_size_width = hmc_size_width
         self.hmc_data_width = hmc_data_width
         if num_hmc_ports_required > 0:
-            self.clock_domains.cd_sys = ClockDomain()
-            self.hmc_clk_rx = Signal(name_override="hmc_rx_clk")
-            self.cd_sys.clk.name_override = "hmc_tx_clk"
-            self.cd_sys.rst.name_override = "hmc_rst"
-            self.hmc_trained = Signal(name_override="hmc_trained", reset=1)
-            self.ios |= {self.hmc_clk_rx, self.cd_sys.clk, self.cd_sys.rst, self.hmc_trained}
-            self.picoHMCports = []
-            for i in range(9):
-                port = HMCPort(addr_width=self.hmc_addr_width, size_width=self.hmc_size_width, data_width=self.hmc_data_width)
-                for name in [x[0] for x in _hmc_port_layout]:
-                    getattr(port, name).name_override = "hmc_{}_p{}".format(name, i)
-                self.ios |= {getattr(port, name) for name in [x[0] for x in _hmc_port_layout]}
-                self.picoHMCports.append(port)
-                self.comb += port.clk.eq(self.cd_sys.clk)
-                if i >= num_hmc_ports_required:
-                    for field, _, dir in _hmc_port_layout:
-                        if field != "clk" and dir == DIR_M_TO_S:
-                            s = getattr(port, field)
-                            self.comb += s.eq(0)
-
-            if num_hmc_ports_required <= 9:
-                self.HMCports = self.picoHMCports
-            else:
-                self.HMCports = [HMCPort(addr_width=self.hmc_addr_width, size_width=self.hmc_size_width, data_width=self.hmc_data_width) for _ in range(num_hmc_ports_required)]
-                portgroups = [list() for _ in range(9)]
-                for i,port in enumerate(self.HMCports):
-                    portgroups[i % 9].append(port)
-                for i in range(9):
-                    self.submodules += HMCPortMultiplexer(out_port=self.picoHMCports[i], in_ports=portgroups[i])
-
+            self.makeHMCports(num_hmc_ports_required)
             self.hmc_data = repack(init, 4) if init else []
             for port in self.HMCports:
                 port.hmc_data = self.hmc_data
+
+    def makeHMCports(self, num_hmc_ports_required):
+        self.clock_domains.cd_sys = ClockDomain()
+        self.hmc_clk_rx = Signal(name_override="hmc_rx_clk")
+        self.cd_sys.clk.name_override = "hmc_tx_clk"
+        self.cd_sys.rst.name_override = "hmc_rst"
+        self.hmc_trained = Signal(name_override="hmc_trained", reset=1)
+        self.ios |= {self.hmc_clk_rx, self.cd_sys.clk, self.cd_sys.rst, self.hmc_trained}
+        self.picoHMCports = []
+        for i in range(9):
+            port = HMCPort(addr_width=self.hmc_addr_width, size_width=self.hmc_size_width, data_width=self.hmc_data_width)
+            for name in [x[0] for x in _hmc_port_layout]:
+                getattr(port, name).name_override = "hmc_{}_p{}".format(name, i)
+            self.ios |= {getattr(port, name) for name in [x[0] for x in _hmc_port_layout]}
+            self.picoHMCports.append(port)
+            self.comb += port.clk.eq(self.cd_sys.clk)
+            if i >= num_hmc_ports_required:
+                for field, _, dir in _hmc_port_layout:
+                    if field != "clk" and dir == DIR_M_TO_S:
+                        s = getattr(port, field)
+                        self.comb += s.eq(0)
+
+        if num_hmc_ports_required <= 9:
+            self.HMCports = self.picoHMCports
+        else:
+            self.HMCports = [HMCPort(addr_width=self.hmc_addr_width, size_width=self.hmc_size_width, data_width=self.hmc_data_width) for _ in range(num_hmc_ports_required)]
+            portgroups = [list() for _ in range(9)]
+            for i,port in enumerate(self.HMCports):
+                portgroups[i % 9].append(port)
+            for i in range(9):
+                self.submodules += HMCPortMultiplexer(out_port=self.picoHMCports[i], in_ports=portgroups[i])
+
 
     def ensureStreamClk(self):
         if not hasattr(self, "cd_stream"):
@@ -402,6 +405,8 @@ class PicoPlatform(Module):
         return self.HMCports[i]
 
     def getHMCClkEtc(self):
+        if not hasattr(self, "cd_sys"):
+            self.makeHMCports(0)
         return self.hmc_clk_rx, self.cd_sys.clk, self.cd_sys.rst, self.hmc_trained
 
     def get_ios(self):
