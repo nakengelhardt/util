@@ -21,7 +21,7 @@ def unpack(data, n):
 def repack(data, n):
     packed_data = []
     for i in range(0, len(data), n):
-        packed_data[i] = pack(data[i:min(i+n, len(data))])
+        packed_data.append(pack(data[i:min(i+n, len(data))]))
     return packed_data
 
 _stream_layout = [
@@ -169,7 +169,7 @@ class HMCPort(Record):
                 logger.debug("{}: HMC request: {} tag={} addr=0x{:X}".format(num_cycles, "read" if cmd == HMC_CMD_RD else "write", tag, addr))
                 assert addr % 16 == 0
                 assert size == 1
-                idx = addr//4
+                idx = addr >> 4
 
                 if cmd == HMC_CMD_RD:
                     inflight.append((tag, idx))
@@ -315,7 +315,7 @@ class PicoPlatform(Module):
         if num_hmc_ports_required > 0:
             self.makeHMCports(num_hmc_ports_required)
             self.hmc_data = repack(init, 4) if init else []
-            for port in self.HMCports:
+            for port in self.picoHMCports:
                 port.hmc_data = self.hmc_data
 
     def makeHMCports(self, num_hmc_ports_required):
