@@ -358,7 +358,6 @@ class PicoPlatform(Module):
             port = HMCPort(addr_width=self.hmc_addr_width, size_width=self.hmc_size_width, data_width=self.hmc_data_width)
             for name in [x[0] for x in _hmc_port_layout]:
                 getattr(port, name).name_override = "hmc_{}_p{}".format(name, i)
-                # getattr(port, name).attr.add("mark_debug")
             self.ios |= {getattr(port, name) for name in [x[0] for x in _hmc_port_layout]}
             self.picoHMCports.append(port)
             self.comb += port.clk.eq(self.cd_sys.clk)
@@ -371,6 +370,8 @@ class PicoPlatform(Module):
         if num_hmc_ports_required <= 9:
             self.HMCports = self.picoHMCports
         else:
+            # this is broken
+            raise NotImplementedError
             self.HMCports = [HMCPort(addr_width=self.hmc_addr_width, size_width=self.hmc_size_width, data_width=self.hmc_data_width) for _ in range(num_hmc_ports_required)]
             portgroups = [list() for _ in range(9)]
             for i,port in enumerate(self.HMCports):
