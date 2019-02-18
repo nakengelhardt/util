@@ -2,9 +2,12 @@ from migen import *
 from migen.genlib.record import *
 from migen.genlib.roundrobin import *
 from migen.genlib.fifo import *
+from migen.fhdl import verilog
+import migen.build.xilinx.common
 
 import random
 import logging
+import struct
 
 def pack(words):
     data = 0
@@ -78,6 +81,22 @@ class PicoBusInterface(Record):
     def __init__(self, data_width=128):
         Record.__init__(self, set_layout_parameters(_bus_layout, data_width=data_width))
 
+    def read(addr):
+        yield self.PicoRd.eq(1)
+        yield self.PicoWr.eq(0)
+        yield self.PicoAddr.eq(addr)
+        yield
+        yield self.PicoRd.eq(0)
+        return (yield self.PicoDataOut)
+
+    def write(addr, data):
+        yield self.PicoRd.eq(0)
+        yield self.PicoWr.eq(1)
+        yield self.PicoAddr.eq(addr)
+        yield self.PicoDataIn.eq(data)
+        yield
+        yield self.PicoWr.eq(0)
+
 _hmc_port_layout = [
     ("clk", 1, DIR_M_TO_S),
     ("cmd_valid", 1, DIR_M_TO_S),
@@ -96,15 +115,15 @@ _hmc_port_layout = [
     ("dinv", 1, DIR_S_TO_M)
 ]
 
-HMC_CMD_RD = 0b0000 # read
-HMC_CMD_WR = 0b1001 # posted write
-HMC_CMD_WR_NP = 0b0001 # non-posted write
-
 class HMCPort(Record):
+    HMC_CMD_RD = 0b0000 # read
+    HMC_CMD_WR = 0b1001 # posted write
+    HMC_CMD_WR_NP = 0b0001 # non-posted write
+
     def __init__(self, **kwargs):
         Record.__init__(self, set_layout_parameters(_hmc_port_layout, **kwargs))
         self.effective_max_tag_size = 6
-
+        self.hmc_data = []
 
     @passive
     def gen_responses(self):
@@ -166,16 +185,16 @@ class HMCPort(Record):
                 size = (yield self.size)
                 tag = (yield self.tag)
                 cmd = (yield self.cmd)
-                logger.debug("{}: HMC request: {} tag={} addr=0x{:X}".format(num_cycles, "read" if cmd == HMC_CMD_RD else "write", tag, addr))
+                logger.debug("{}: HMC request: {} tag={} addr=0x{:X}".format(num_cycles, "read" if cmd == self.HMC_CMD_RD else "write", tag, addr))
                 assert addr % 16 == 0
                 assert size == 1
                 idx = addr >> 4
 
-                if cmd == HMC_CMD_RD:
+                if cmd == self.HMC_CMD_RD:
                     inflight.append((tag, idx))
-                elif cmd == HMC_CMD_WR:
+                elif cmd == self.HMC_CMD_WR:
                     cmd_inflight_w.append((-1, idx))
-                elif cmd == HMC_CMD_WR_NP:
+                elif cmd == self.HMC_CMD_WR_NP:
                     cmd_inflight_w.append((tag, idx))
                 else:
                     raise NotImplementedError
@@ -292,7 +311,7 @@ class HMCPortWriteUnifier(Module):
             # input flow control
             self.cmd_ready.eq(self.cmd_fifo.writable & self.data_fifo.writable),
             self.cmd_fifo.we.eq(self.cmd_ready & self.cmd_valid),
-            self.data_fifo.we.eq(self.cmd_ready & self.cmd_valid & (self.cmd != HMC_CMD_RD)),
+            self.data_fifo.we.eq(self.cmd_ready & self.cmd_valid & (self.cmd != pico_port.HMC_CMD_RD)),
             # output cmd
             pico_port.cmd.eq(cmd_fifo_out.cmd),
             pico_port.addr.eq(cmd_fifo_out.addr),
@@ -319,6 +338,8 @@ class PicoPlatform(Module):
         self.hmc_addr_width = hmc_addr_width
         self.hmc_size_width = hmc_size_width
         self.hmc_data_width = hmc_data_width
+        if init:
+            self.init_data = init
         if num_hmc_ports_required > 0:
             self.makeHMCports(num_hmc_ports_required)
             self.hmc_data = repack(init, 4) if init else []
@@ -337,7 +358,7 @@ class PicoPlatform(Module):
             port = HMCPort(addr_width=self.hmc_addr_width, size_width=self.hmc_size_width, data_width=self.hmc_data_width)
             for name in [x[0] for x in _hmc_port_layout]:
                 getattr(port, name).name_override = "hmc_{}_p{}".format(name, i)
-                getattr(port, name).attr.add("mark_debug")
+                # getattr(port, name).attr.add("mark_debug")
             self.ios |= {getattr(port, name) for name in [x[0] for x in _hmc_port_layout]}
             self.picoHMCports.append(port)
             self.comb += port.clk.eq(self.cd_sys.clk)
@@ -426,3 +447,24 @@ class PicoPlatform(Module):
         else:
             generators = dict()
         return generators
+
+    def simulate(self, user_module, user_cd="sys", vcd_name="tb.vcd"):
+        self.submodules.user_module = user_module
+        generators = self.getSimGenerators()
+        generators[user_cd].extend(get_simulators(user_module, 'gen_selfcheck', user_module))
+        generators[user_cd].extend(get_simulators(user_module, 'gen_simulation', user_module))
+        run_simulation(self, generators, clocks={"sys": 10, "bus": 480, "stream": 8}, vcd_name=vcd_name)
+
+    def export(self, user_module, module_name="top", filename="top.v"):
+        self.submodules.user_module = user_module
+        so = dict(migen.build.xilinx.common.xilinx_special_overrides)
+        verilog.convert(self,
+                        name=module_name,
+                        ios=self.get_ios(),
+                        special_overrides=so,
+                        create_clock_domains=False
+                        ).write(filename)
+        if hasattr(self, "init_data"):
+            with open("hmc_init.data", 'wb') as f:
+                for x in self.init_data:
+                    f.write(struct.pack('=I', x))
