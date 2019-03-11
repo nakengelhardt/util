@@ -9,23 +9,7 @@ import random
 import logging
 import struct
 
-def pack(words):
-    data = 0
-    for i, word in enumerate(words):
-        data = data | ((word & 0xFFFFFFFF) << i*32)
-    return data
-
-def unpack(data, n):
-    words = []
-    for i in range(n):
-        words.append((data >> i*32) & 0xFFFFFFFF)
-    return words
-
-def repack(data, n):
-    packed_data = []
-    for i in range(0, len(data), n):
-        packed_data.append(pack(data[i:min(i+n, len(data))]))
-    return packed_data
+from misc import *
 
 _stream_layout = [
     ("valid", 1, DIR_M_TO_S),
@@ -81,7 +65,7 @@ class PicoBusInterface(Record):
     def __init__(self, data_width=128):
         Record.__init__(self, set_layout_parameters(_bus_layout, data_width=data_width))
 
-    def read(addr):
+    def read(self, addr):
         yield self.PicoRd.eq(1)
         yield self.PicoWr.eq(0)
         yield self.PicoAddr.eq(addr)
@@ -89,7 +73,7 @@ class PicoBusInterface(Record):
         yield self.PicoRd.eq(0)
         return (yield self.PicoDataOut)
 
-    def write(addr, data):
+    def write(self, addr, data):
         yield self.PicoRd.eq(0)
         yield self.PicoWr.eq(1)
         yield self.PicoAddr.eq(addr)
@@ -208,7 +192,7 @@ class HMCPortMultiplexer(Module):
         if len(in_ports) == 0:
             return
         if len(in_ports) == 1:
-            self.comb += in_ports[0].connect(out_port)
+            self.comb += in_ports[0].connect(out_port, omit={"clk"})
             return
 
         ## serve requests in roundrobin fashion
@@ -226,24 +210,20 @@ class HMCPortMultiplexer(Module):
             # ("size", "size_width", DIR_M_TO_S),
             # ("tag", 6, DIR_M_TO_S),
 
-        array_cmd_valid = Array(port.cmd_valid for port in in_ports)
-        array_cmd_ready = Array(port.cmd_ready for port in in_ports)
-        array_cmd = Array(port.cmd for port in in_ports)
-        array_addr = Array(port.addr for port in in_ports)
-        array_size = Array(port.size for port in in_ports)
-        array_tag = Array(port.tag for port in in_ports)
+        if not isinstance(in_ports, Array):
+            in_ports = Array(in_ports)
 
         self.submodules.roundrobin = RoundRobin(len(in_ports), switch_policy=SP_CE)
 
         self.comb += [
             [self.roundrobin.request[i].eq(port.cmd_valid) for i, port in enumerate(in_ports)],
             self.roundrobin.ce.eq(out_port.cmd_ready),
-            out_port.cmd_valid.eq(array_cmd_valid[self.roundrobin.grant]),
-            array_cmd_ready[self.roundrobin.grant].eq(out_port.cmd_ready),
-            out_port.cmd.eq(array_cmd[self.roundrobin.grant]),
-            out_port.addr.eq(array_addr[self.roundrobin.grant]),
-            out_port.size.eq(array_size[self.roundrobin.grant]),
-            out_port.tag.eq(Cat(array_tag[self.roundrobin.grant][0:effective_max_tag_size], self.roundrobin.grant))
+            out_port.cmd_valid.eq(in_ports[self.roundrobin.grant].cmd_valid),
+            in_ports[self.roundrobin.grant].cmd_ready.eq(out_port.cmd_ready),
+            out_port.cmd.eq(in_ports[self.roundrobin.grant].cmd),
+            out_port.addr.eq(in_ports[self.roundrobin.grant].addr),
+            out_port.size.eq(in_ports[self.roundrobin.grant].size),
+            out_port.tag.eq(Cat(in_ports[self.roundrobin.grant].tag[0:effective_max_tag_size], self.roundrobin.grant))
         ]
 
         ## write requests not implemented
@@ -260,12 +240,10 @@ class HMCPortMultiplexer(Module):
         # ("rd_data_valid", 1, DIR_S_TO_M),
         # ("dinv", 1, DIR_S_TO_M)
 
-        array_data_valid = Array(port.rd_data_valid for port in in_ports)
-
         self.comb += [
             [port.rd_data.eq(out_port.rd_data) for port in in_ports],
-            [port.rd_data_tag.eq(out_port.rd_data_tag[:effective_max_tag_size]) for port in in_ports],
-            array_data_valid[out_port.rd_data_tag[effective_max_tag_size:]].eq(out_port.rd_data_valid),
+            [port.rd_data_tag.eq(out_port.rd_data_tag[0:effective_max_tag_size]) for port in in_ports],
+            in_ports[out_port.rd_data_tag[effective_max_tag_size:]].rd_data_valid.eq(out_port.rd_data_valid),
             [port.dinv.eq(out_port.dinv) for port in in_ports]
         ]
 
@@ -370,8 +348,6 @@ class PicoPlatform(Module):
         if num_hmc_ports_required <= 9:
             self.HMCports = self.picoHMCports
         else:
-            # this is broken
-            raise NotImplementedError
             self.HMCports = [HMCPort(addr_width=self.hmc_addr_width, size_width=self.hmc_size_width, data_width=self.hmc_data_width) for _ in range(num_hmc_ports_required)]
             portgroups = [list() for _ in range(9)]
             for i,port in enumerate(self.HMCports):
