@@ -108,58 +108,20 @@ class HMCPort(Record):
         Record.__init__(self, set_layout_parameters(_hmc_port_layout, **kwargs))
         self.effective_max_tag_size = 6
         self.hmc_data = []
+        self.cmd_inflight_r = []
+        self.cmd_inflight_w = []
+        self.data_inflight_w = []
 
     @passive
-    def gen_responses(self):
-
-        logger = logging.getLogger('simulation.pico')
-        logger.setLevel(logging.INFO)
-        logger.debug("start HMC sim")
+    def gen_cmd(self):
         num_cycles = 0
-        inflight = []
-        cmd_inflight_w = []
-        data_inflight_w = []
+        logger = logging.getLogger('simulation.pico')
+
         while True:
             if random.choice([True, False]):
                 (yield self.cmd_ready.eq(1))
             else:
                 (yield self.cmd_ready.eq(0))
-
-            if len(cmd_inflight_w) < len(data_inflight_w):
-                (yield self.wr_data_ready.eq(0))
-            else:
-                (yield self.wr_data_ready.eq(1))
-
-            case = random.choice([0,1,2])
-
-            if case == 0 and cmd_inflight_w:
-                i = random.randrange(len(cmd_inflight_w))
-                if i < len(data_inflight_w):
-                    tag, idx = cmd_inflight_w[i]
-                    del cmd_inflight_w[i]
-                    val = data_inflight_w[i]
-                    del data_inflight_w[i]
-                    if idx >= len(self.hmc_data):
-                        self.hmc_data.extend(0 for _ in range(len(self.hmc_data), idx+1))
-                    self.hmc_data[idx] = val
-                    if tag >= 0:
-                        (yield self.rd_data_tag.eq(tag))
-                        (yield self.rd_data_valid.eq(1))
-                    else:
-                        (yield self.rd_data_valid.eq(0))
-                else:
-                    (yield self.rd_data_valid.eq(0))
-            elif case == 1 and inflight:
-                tag, idx = random.choice(inflight)
-                val = self.hmc_data[idx]
-                inflight.remove((tag, idx))
-                (yield self.rd_data.eq(val))
-                (yield self.rd_data_tag.eq(tag))
-                (yield self.rd_data_valid.eq(1))
-                logger.debug("{}: HMC reply: tag={} data=0x{:X}".format(num_cycles, tag, val))
-            else:
-                (yield self.rd_data_valid.eq(0))
-
 
             yield
             num_cycles += 1
@@ -169,23 +131,99 @@ class HMCPort(Record):
                 size = (yield self.size)
                 tag = (yield self.tag)
                 cmd = (yield self.cmd)
-                logger.debug("{}: HMC request: {} tag={} addr=0x{:X}".format(num_cycles, "read" if cmd == self.HMC_CMD_RD else "write", tag, addr))
+                logger.debug("{}: HMC request: {} tag={} addr=0x{:X} size={}".format(num_cycles, "read" if cmd == self.HMC_CMD_RD else "write", tag, addr, size))
                 assert addr % 16 == 0
-                assert size == 1
+                assert size > 0
+                assert size <= 8
                 idx = addr >> 4
 
                 if cmd == self.HMC_CMD_RD:
-                    inflight.append((tag, idx))
+                    self.cmd_inflight_r.append({'tag':tag, 'idx':idx, 'size':size})
                 elif cmd == self.HMC_CMD_WR:
-                    cmd_inflight_w.append((-1, idx))
+                    self.cmd_inflight_w.append({'tag':-1, 'idx':idx, 'size':size})
                 elif cmd == self.HMC_CMD_WR_NP:
-                    cmd_inflight_w.append((tag, idx))
+                    self.cmd_inflight_w.append({'tag':tag, 'idx':idx, 'size':size})
                 else:
                     raise NotImplementedError
 
+    @passive
+    def gen_rd(self):
+        num_cycles = 0
+        logger = logging.getLogger('sim.pico')
+
+        while True:
+            yield self.rd_data_valid.eq(0)
+            if random.choice([True, False]) and self.cmd_inflight_w:
+                i = random.randrange(len(self.cmd_inflight_w))
+                len_prev = sum([self.cmd_inflight_w[j]['size'] for j in range(i)])
+                logger.debug("considering request {}: {}".format(i, self.cmd_inflight_w[i]))
+                logger.debug("need {} words starting at index {} of {}".format(self.cmd_inflight_w[i]['size'], len_prev, self.data_inflight_w))
+
+                if len_prev + self.cmd_inflight_w[i]['size'] <= len(self.data_inflight_w):
+                    logger.debug("executing write request: {}".format(self.cmd_inflight_w[i]))
+                    logger.debug("data before: {}".format(self.data_inflight_w))
+                    # we have the necessary data already
+                    cmd = self.cmd_inflight_w[i]
+                    del self.cmd_inflight_w[i]
+
+                    if len(self.hmc_data) < cmd['idx'] + cmd['size']:
+                        self.hmc_data.extend(0 for _ in range(len(self.hmc_data), cmd['idx'] + cmd['size']+1))
+
+                    for j in range(cmd['size']):
+                        self.hmc_data[cmd['idx'] + j] = self.data_inflight_w[len_prev]
+                        del self.data_inflight_w[len_prev]
+                        # could yield here to make it non-atomic the way the real thing presumably is
+                        # but let's not
+                        #
+                        # yield
+
+                    if cmd['tag'] >= 0:
+                        yield self.rd_data_tag.eq(cmd['tag'])
+                        yield self.rd_data_valid.eq(1)
+                    logger.debug("data after: {}".format(self.data_inflight_w))
+                else:
+                    logger.debug("data for request not available yet")
+                yield
+                num_cycles += 1
+            elif self.cmd_inflight_r:
+
+                cmd = random.choice(self.cmd_inflight_r)
+                self.cmd_inflight_r.remove(cmd)
+
+                logger.debug("executing read request {}".format(cmd))
+
+                for i in range(cmd['size']):
+                    val = self.hmc_data[cmd['idx'] + i]
+                    logger.debug("{}: HMC reply: tag={} data=0x{:X}".format(num_cycles, cmd['tag'], val))
+                    yield self.rd_data.eq(val)
+                    yield self.rd_data_tag.eq(cmd['tag'])
+                    yield self.rd_data_valid.eq(1)
+                    yield
+                    num_cycles += 1
+
+            else:
+                yield
+                num_cycles += 1
+
+
+    @passive
+    def gen_wr(self):
+        num_cycles = 0
+        while True:
+            if random.choice([True, False]):
+                (yield self.wr_data_ready.eq(1))
+            else:
+                (yield self.wr_data_ready.eq(0))
+
+            yield
+            num_cycles += 1
+
             if (yield self.wr_data_ready) and (yield self.wr_data_valid):
                 val = (yield self.wr_data)
-                data_inflight_w.append(val)
+                self.data_inflight_w.append(val)
+
+    def get_simulators(self):
+        return self.gen_cmd(), self.gen_rd(), self.gen_wr()
 
 class HMCPortMultiplexer(Module):
     def __init__(self, out_port, in_ports):
@@ -420,10 +458,12 @@ class PicoPlatform(Module):
 
     def getSimGenerators(self):
         if hasattr(self, "cd_sys"):
-            generators = {"sys": [port.gen_responses() for port in self.picoHMCports]}
+            generators = []
+            for port in self.picoHMCports:
+                generators.extend([port.gen_cmd(), port.gen_rd(), port.gen_wr()])
+            return {"sys": generators}
         else:
-            generators = dict()
-        return generators
+            return dict()
 
     def simulate(self, user_module, user_cd="sys", vcd_name="tb.vcd"):
         self.submodules.user_module = user_module
