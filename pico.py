@@ -5,11 +5,22 @@ from migen.genlib.fifo import *
 from migen.fhdl import verilog
 import migen.build.xilinx.common
 
+from recordfifo import RecordFIFO
+
 import random
 import logging
 import struct
 
 from misc import *
+
+
+@passive
+def gen_timeout(cycles):
+    time = 0
+    while time < cycles:
+        yield
+        time += 1
+    raise TimeoutError()
 
 _stream_layout = [
     ("valid", 1, DIR_M_TO_S),
@@ -239,7 +250,7 @@ class HMCPortMultiplexer(Module):
             ("addr", len(out_port.addr)),
             ("size", len(out_port.size)),
             ("tag", len(out_port.tag))
-        ])
+        ], depth=8)
 
         self.comb += [
             out_port.cmd.eq(self.cmd_fifo.dout.cmd),
@@ -480,11 +491,13 @@ class PicoPlatform(Module):
         else:
             return dict()
 
-    def simulate(self, user_module, user_cd="sys", vcd_name="tb.vcd"):
+    def simulate(self, user_module, user_cd="sys", vcd_name="tb.vcd", timeout=None):
         self.submodules.user_module = user_module
         generators = self.getSimGenerators()
         generators[user_cd].extend(get_simulators(user_module, 'gen_selfcheck', user_module))
         generators[user_cd].extend(get_simulators(user_module, 'gen_simulation', user_module))
+        if timeout:
+            generators[user_cd].append(gen_timeout(cycles=timeout))
         run_simulation(self, generators, clocks={"sys": 10, "bus": 480, "stream": 8}, vcd_name=vcd_name)
 
     def export(self, user_module, module_name="top", filename="top.v"):
