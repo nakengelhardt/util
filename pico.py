@@ -234,6 +234,21 @@ class HMCPortMultiplexer(Module):
             return
 
         ## serve requests in roundrobin fashion
+        self.submodules.cmd_fifo = RecordFIFO(layout=[
+            ("cmd", len(out_port.cmd)),
+            ("addr", len(out_port.addr)),
+            ("size", len(out_port.size)),
+            ("tag", len(out_port.tag))
+        ])
+
+        self.comb += [
+            out_port.cmd.eq(self.cmd_fifo.dout.cmd),
+            out_port.addr.eq(self.cmd_fifo.dout.addr),
+            out_port.size.eq(self.cmd_fifo.dout.size),
+            out_port.tag.eq(self.cmd_fifo.dout.tag),
+            out_port.cmd_valid.eq(self.cmd_fifo.readable),
+            self.cmd_fifo.re.eq(out_port.cmd_ready)
+        ]
 
         # each port gets a subset of tags to use
         mux_bits = bits_for(len(in_ports)-1)
@@ -255,13 +270,13 @@ class HMCPortMultiplexer(Module):
 
         self.comb += [
             [self.roundrobin.request[i].eq(port.cmd_valid) for i, port in enumerate(in_ports)],
-            self.roundrobin.ce.eq(out_port.cmd_ready),
-            out_port.cmd_valid.eq(in_ports[self.roundrobin.grant].cmd_valid),
-            in_ports[self.roundrobin.grant].cmd_ready.eq(out_port.cmd_ready),
-            out_port.cmd.eq(in_ports[self.roundrobin.grant].cmd),
-            out_port.addr.eq(in_ports[self.roundrobin.grant].addr),
-            out_port.size.eq(in_ports[self.roundrobin.grant].size),
-            out_port.tag.eq(Cat(in_ports[self.roundrobin.grant].tag[0:effective_max_tag_size], self.roundrobin.grant))
+            self.roundrobin.ce.eq(self.cmd_fifo.writable),
+            self.cmd_fifo.we.eq(in_ports[self.roundrobin.grant].cmd_valid),
+            in_ports[self.roundrobin.grant].cmd_ready.eq(self.cmd_fifo.writable),
+            self.cmd_fifo.din.cmd.eq(in_ports[self.roundrobin.grant].cmd),
+            self.cmd_fifo.din.addr.eq(in_ports[self.roundrobin.grant].addr),
+            self.cmd_fifo.din.size.eq(in_ports[self.roundrobin.grant].size),
+            self.cmd_fifo.din.tag.eq(Cat(in_ports[self.roundrobin.grant].tag[0:effective_max_tag_size], self.roundrobin.grant))
         ]
 
         ## write requests not implemented
