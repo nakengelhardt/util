@@ -57,7 +57,11 @@ class PicoStreamInterface(Record):
             if (yield channel.valid):
                 data = unpack((yield channel.data), min(channelwidth, nwords-len(words)))
                 for i, word in enumerate(reversed(data)):
-                    print("{:08x}".format(word), end='\n' if i % 4 == 3 else '_')
+                    print("{:08x}".format(word), end='')
+                    if i % 4 == 3 or len(words) + i == nwords - 1:
+                        print()
+                    else:
+                        print('_', end='')
                 words.extend(data)
                 if len(words) >= nwords:
                     yield channel.rdy.eq(0)
@@ -372,7 +376,7 @@ class HMCPortWriteUnifier(Module):
         ]
 
 class PicoPlatform(Module):
-    def __init__(self, num_hmc_ports_required, bus_width=32, stream_width=128, hmc_addr_width=34, hmc_size_width=4, hmc_data_width=128, init=None):
+    def __init__(self, num_hmc_ports_required, bus_width=32, stream_width=128, hmc_addr_width=34, hmc_size_width=4, hmc_data_width=128, init=None, init_elem_size_bytes=4):
         self.ios = set()
         self.streams = []
         self.stream_width = stream_width
@@ -384,7 +388,7 @@ class PicoPlatform(Module):
             self.init_data = init
         if num_hmc_ports_required > 0:
             self.makeHMCports(num_hmc_ports_required)
-            self.hmc_data = repack(init, 4) if init else []
+            self.hmc_data = repack(init, 16//init_elem_size_bytes, wordsize=init_elem_size_bytes*8) if init else []
             for port in self.picoHMCports:
                 port.hmc_data = self.hmc_data
 
@@ -491,11 +495,12 @@ class PicoPlatform(Module):
         else:
             return dict()
 
-    def simulate(self, user_module, user_cd="sys", vcd_name="tb.vcd", timeout=None):
+    def simulate(self, user_module, user_generators=[], user_cd="sys", user_args=[], vcd_name="tb.vcd", timeout=None):
         self.submodules.user_module = user_module
         generators = self.getSimGenerators()
-        generators[user_cd].extend(get_simulators(user_module, 'gen_selfcheck', user_module))
-        generators[user_cd].extend(get_simulators(user_module, 'gen_simulation', user_module))
+        generators[user_cd].extend(get_simulators(user_module, 'gen_selfcheck', *user_args))
+        # generators[user_cd].extend(get_simulators(user_module, 'gen_simulation', *user_args))
+        generators[user_cd].extend(user_generators)
         if timeout:
             generators[user_cd].append(gen_timeout(cycles=timeout))
         run_simulation(self, generators, clocks={"sys": 10, "bus": 480, "stream": 8}, vcd_name=vcd_name)
