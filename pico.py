@@ -39,6 +39,7 @@ class PicoStreamInterface(Record):
         nsent = 0
         while nsent < nwords:
             data = pack(words[nsent:min(nsent+channelwidth, nwords)])
+            print("Stream {}: send {}".format(channel.streamID, words[nsent:min(nsent+channelwidth, nwords)]))
             yield channel.data.eq(data)
             yield channel.valid.eq(1)
             yield
@@ -79,6 +80,8 @@ _bus_layout =[
 class PicoBusInterface(Record):
     def __init__(self, data_width=128):
         Record.__init__(self, set_layout_parameters(_bus_layout, data_width=data_width))
+        self.current_status_addr = 0x10000
+        self.current_control_addr = 0x20000
 
     def read(self, addr):
         yield self.PicoRd.eq(1)
@@ -453,6 +456,29 @@ class PicoPlatform(Module):
         self.ensureBus()
         return self.bus
 
+    def makeStatusRegister(self, status_reg):
+        self.ensureBus()
+        assert self.bus.current_status_addr < 0x20000
+        status_reg_pico = Signal.like(status_reg)
+        self.specials += MultiReg(status_reg, status_reg_pico, odomain="bus")
+        self.sync.bus += [
+            If( self.bus.PicoRd & (self.bus.PicoAddr == self.bus.current_status_addr),
+                self.bus.PicoDataOut.eq(status_reg_pico)
+            )
+        ]
+        self.bus.current_status_addr += 4
+
+    def makeControlRegister(self, control_reg, odomain="sys"):
+        self.ensureBus()
+        control_reg_pico = Signal.like(control_reg)
+        self.specials += MultiReg(control_reg_pico, control_reg, odomain=odomain)
+        self.sync.bus += [
+            If( self.bus.PicoWr & (self.bus.PicoAddr == self.bus.current_control_addr),
+                control_reg_pico.eq(self.bus.PicoDataIn)
+            )
+        ]
+        self.bus.current_control_addr += 4
+
     def getBusClk(self):
         self.ensureBus()
         return self.cd_bus
@@ -468,6 +494,8 @@ class PicoPlatform(Module):
                 getattr(tx, name).name_override="s{}o_{}".format(i, name)
         self.ios |= {getattr(rx, name) for name in [x[0] for x in _stream_layout]}
         self.ios |= {getattr(tx, name) for name in [x[0] for x in _stream_layout]}
+        rx.streamID = i
+        tx.streamID = i
 
         return rx, tx
 

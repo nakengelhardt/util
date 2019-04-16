@@ -47,8 +47,10 @@ class HMCReorderBuffer(Module):
 
         self.burst_order_error = Signal()
 
+        self.submodules.outfifo = SyncFIFO(width=len(self.rep.data), depth=8)
+
         self.sync += [
-            If(self.rep.valid & self.rep.ack,
+            If(self.outfifo.writable & self.outfifo.we,
                 If(rd_flit == size_rd_port.dat_r - 1,
                     rd_flit.eq(0),
                     tag_in_use[rd_ptr].eq(0),
@@ -107,11 +109,17 @@ class HMCReorderBuffer(Module):
             wr_port.adr.eq(Cat(wr_flit, hmc_port.rd_data_tag)),
 
             rd_port.adr.eq(Cat(rd_flit, rd_ptr)),
-            self.rep.data.eq(rd_port.dat_r),
-            self.rep.valid.eq(data_valid[rd_ptr]),
 
             size_rd_port.adr.eq(rd_ptr),
             size_tag_port.adr.eq(hmc_port.rd_data_tag)
+        ]
+
+        self.comb += [
+            self.outfifo.din.eq(rd_port.dat_r),
+            self.outfifo.we.eq(data_valid[rd_ptr]),
+            self.rep.data.eq(self.outfifo.dout),
+            self.rep.valid.eq(self.outfifo.readable),
+            self.outfifo.re.eq(self.rep.ack)
         ]
 
         # stats
