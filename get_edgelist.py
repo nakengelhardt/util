@@ -4,6 +4,7 @@ from migen.genlib.fsm import *
 
 from hmc_reorder_buffer import HMCReorderBuffer
 from pico import HMCPort
+from recordfifo import InterfaceFIFO
 
 class GetEdgelistHMC(Module):
     def __init__(self, port, vertex_size_in_bits=32):
@@ -40,6 +41,14 @@ class GetEdgelistHMC(Module):
         self.submodules.ordered_port = HMCReorderBuffer(port)
         self.submodules.length_fifo = SyncFIFO(width=bits_for(max_flit_in_burst*vertices_per_flit), depth=64)
         self.submodules.last_fifo = SyncFIFO(width=1, depth=64)
+
+        self.submodules.outfifo = InterfaceFIFO(layout=[
+            ("vertex_array", len(port.rd_data), DIR_M_TO_S),
+            ("nvtx", bits_for(vertices_per_flit), DIR_M_TO_S),
+            ("last", 1, DIR_M_TO_S),
+            ("valid", 1, DIR_M_TO_S),
+            ("ack", 1, DIR_S_TO_M)
+        ], depth=8)
 
         # issue requests for edgelist
         addr = Signal(addr_size)
@@ -122,7 +131,7 @@ class GetEdgelistHMC(Module):
             self.length_fifo.re.eq(get_new_expected),
             self.last_fifo.re.eq(get_new_expected),
             last_flit.eq(nvtx_expected <= vertices_per_flit),
-            If(self.rep.ack,
+            If(self.outfifo.din.ack,
                 If(nvtx_expected_valid,
                     get_new_expected.eq(last_flit & self.ordered_port.rep.valid),
                 ).Else(
@@ -130,18 +139,19 @@ class GetEdgelistHMC(Module):
                 )
             ),
 
-            self.rep.vertex_array.eq(self.ordered_port.rep.data),
-            self.rep.valid.eq(self.ordered_port.rep.valid & nvtx_expected_valid),
-            self.ordered_port.rep.ack.eq(self.rep.ack & nvtx_expected_valid),
+            self.outfifo.din.vertex_array.eq(self.ordered_port.rep.data),
+            self.outfifo.din.valid.eq(self.ordered_port.rep.valid & nvtx_expected_valid),
+            self.ordered_port.rep.ack.eq(self.outfifo.din.ack & nvtx_expected_valid),
 
             If(last_flit,
-                self.rep.last.eq(last_burst),
-                self.rep.nvtx.eq(nvtx_expected)
+                self.outfifo.din.last.eq(last_burst),
+                self.outfifo.din.nvtx.eq(nvtx_expected)
             ).Else(
-                self.rep.last.eq(0),
-                self.rep.nvtx.eq(vertices_per_flit)
-            )
+                self.outfifo.din.last.eq(0),
+                self.outfifo.din.nvtx.eq(vertices_per_flit)
+            ),
 
+            self.outfifo.dout.connect(self.rep)
 
         ]
 
