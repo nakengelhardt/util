@@ -87,7 +87,7 @@ class GetEdgelistHMC(Module):
         self.comb += [
             self.req.ack.eq(get_new_addr),
             self.ordered_port.req.addr.eq(addr),
-            self.ordered_port.req.valid.eq(valid),
+            self.ordered_port.req.valid.eq(valid & self.length_fifo.writable),
             self.last_fifo.din.eq(last_cmd),
             If(last_cmd & (partial_burst | partial_flit),
                 self.length_fifo.din.eq(length_bytes[vtx_offset:burst_offset])

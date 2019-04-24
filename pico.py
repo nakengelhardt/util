@@ -379,7 +379,7 @@ class HMCPortWriteUnifier(Module):
         ]
 
 class PicoPlatform(Module):
-    def __init__(self, num_hmc_ports_required, bus_width=32, stream_width=128, hmc_addr_width=34, hmc_size_width=4, hmc_data_width=128, init=None, init_elem_size_bytes=4):
+    def __init__(self, num_hmc_ports_required, create_hmc_ios=False, bus_width=32, stream_width=128, hmc_addr_width=34, hmc_size_width=4, hmc_data_width=128, init=None, init_elem_size_bytes=4):
         self.ios = set()
         self.streams = []
         self.stream_width = stream_width
@@ -389,7 +389,7 @@ class PicoPlatform(Module):
         self.hmc_data_width = hmc_data_width
         if init:
             self.init_data = init
-        if num_hmc_ports_required > 0:
+        if num_hmc_ports_required > 0 or create_hmc_ios:
             self.makeHMCports(num_hmc_ports_required)
             self.hmc_data = repack(init, 16//init_elem_size_bytes, wordsize=init_elem_size_bytes*8) if init else []
             for port in self.picoHMCports:
