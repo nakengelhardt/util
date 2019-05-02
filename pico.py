@@ -32,8 +32,7 @@ class PicoStreamInterface(Record):
     def __init__(self, data_width=128):
         Record.__init__(self, set_layout_parameters(_stream_layout, data_width=data_width))
 
-    def write(channel, words):
-        wordsize = 32
+    def write(channel, words, wordsize = 32):
         channelwidth = len(channel.data)//wordsize
         nwords = len(words)
         nsent = 0
@@ -49,24 +48,26 @@ class PicoStreamInterface(Record):
         yield channel.valid.eq(0)
         yield
 
-    def read(channel, nwords):
-        wordsize = 32
+    def read(channel, nwords, wordsize = 32):
         channelwidth = len(channel.data)//wordsize
         words = []
         yield channel.rdy.eq(1)
         while len(words) < nwords:
-            if (yield channel.valid):
-                data = unpack((yield channel.data), min(channelwidth, nwords-len(words)))
-                for i, word in enumerate(reversed(data)):
-                    print("{:08x}".format(word), end='')
-                    if i % 4 == 3 or len(words) + i == nwords - 1:
-                        print()
-                    else:
-                        print('_', end='')
+            if (yield channel.valid) and (yield channel.rdy):
+                data = unpack((yield channel.data), min(channelwidth, nwords-len(words)), wordsize=wordsize)
+                print("Stream {}: receive {}".format(channel.streamID, data))
+                # for i, word in enumerate(reversed(data)):
+                    # hex_chars_per_word = wordsize//4
+                    # print("{{:0{}x}}".format(hex_chars_per_word).format(word), end='')
+                    # if i % channelwidth == channelwidth - 1 or len(words) + i == nwords - 1:
+                    #     print()
+                    # else:
+                    #     print('_', end='')
                 words.extend(data)
                 if len(words) >= nwords:
                     yield channel.rdy.eq(0)
             yield
+        yield channel.rdy.eq(0)
         return words
 
 _bus_layout =[
@@ -396,6 +397,7 @@ class PicoPlatform(Module):
                 port.hmc_data = self.hmc_data
 
     def makeHMCports(self, num_hmc_ports_required):
+        self.ensureBus()
         self.clock_domains.cd_sys = ClockDomain()
         self.hmc_clk_rx = Signal(name_override="hmc_rx_clk")
         self.cd_sys.clk.name_override = "hmc_tx_clk"
@@ -515,13 +517,16 @@ class PicoPlatform(Module):
         return self.ios
 
     def getSimGenerators(self):
+        generators = {}
         if hasattr(self, "cd_sys"):
-            generators = []
+            generators["sys"] = []
             for port in self.picoHMCports:
-                generators.extend([port.gen_cmd(), port.gen_rd(), port.gen_wr()])
-            return {"sys": generators}
-        else:
-            return dict()
+                generators["sys"].extend([port.gen_cmd(), port.gen_rd(), port.gen_wr()])
+        if hasattr(self, "cd_stream"):
+            generators["stream"] = []
+        if hasattr(self, "cd_bus"):
+            generators["bus"] = []
+        return generators
 
     def simulate(self, user_module, user_generators=[], user_cd="sys", user_args=[], vcd_name="tb.vcd", timeout=None):
         self.submodules.user_module = user_module

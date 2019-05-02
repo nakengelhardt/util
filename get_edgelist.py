@@ -17,6 +17,7 @@ class GetEdgelistHMC(Module):
         vtx_offset = log2_int(vertex_size_in_bits//8)
         flit_offset = log2_int(len(port.rd_data)//8)
         burst_offset = flit_offset+log2_int(max_flit_in_burst)
+        self.bytes_per_vertex = vertex_size_in_bits//8
 
 
         # input signals
@@ -36,6 +37,26 @@ class GetEdgelistHMC(Module):
             ("valid", 1),
             ("ack", 1)
         ])
+
+        self.submodules.in_fifo = SyncFIFO(width = 2*addr_size, depth = 8)
+        req = Record([
+            ("start_address", addr_size),
+            ("end_address", addr_size),
+            ("valid", 1),
+            ("ack", 1)
+        ])
+
+        self.comb += [
+            self.in_fifo.din[:addr_size].eq(self.req.start_address),
+            self.in_fifo.din[addr_size:].eq(self.req.end_address),
+            self.in_fifo.we.eq(self.req.valid),
+            self.req.ack.eq(self.in_fifo.writable),
+            req.start_address.eq(self.in_fifo.dout[:addr_size]),
+            req.end_address.eq(self.in_fifo.dout[addr_size:]),
+            req.valid.eq(self.in_fifo.readable),
+            self.in_fifo.re.eq(req.ack)
+        ]
+
 
         # submodules
         self.submodules.ordered_port = HMCReorderBuffer(port)
@@ -76,16 +97,16 @@ class GetEdgelistHMC(Module):
 
         self.sync += [
             If(get_new_addr,
-                addr.eq(self.req.start_address),
-                end_addr.eq(self.req.end_address),
-                valid.eq(self.req.valid)
+                addr.eq(req.start_address),
+                end_addr.eq(req.end_address),
+                valid.eq(req.valid & (req.end_address > req.start_address))
             ).Elif(self.ordered_port.req.valid & self.ordered_port.req.ack,
                 addr.eq(addr + max_flit_in_burst*bytes_per_flit),
             ),
         ]
 
         self.comb += [
-            self.req.ack.eq(get_new_addr),
+            req.ack.eq(get_new_addr),
             self.ordered_port.req.addr.eq(addr),
             self.ordered_port.req.valid.eq(valid & self.length_fifo.writable),
             self.last_fifo.din.eq(last_cmd),
@@ -157,25 +178,27 @@ class GetEdgelistHMC(Module):
 
     @passive
     def gen_selfcheck(self, testcase=None):
+
         def fail(reason=""):
-            if testcase:
+            if hasattr(testcase, "fail"):
                 testcase.fail(reason)
             else:
                 import logging
                 logger = logging.getLogger("sim")
                 logger.error(reason)
 
-        yield
-
-        if (yield self.req.valid):
-            start = (yield self.req.start_address)
-            end = (yield self.req.end_address)
-            if end < start:
-                fail("Request to get edgelist with invalid range {:x} - {:x}".format(start, end))
-            if start % 16 != 0:
-                fail("start_address not aligned: {}".format(end))
-            if end % 4 != 0:
-                fail("end_address not aligned: {}".format(end))
+        while True:
+            yield
+            if (yield self.req.valid) and (yield self.req.ack):
+                start = (yield self.req.start_address)
+                end = (yield self.req.end_address)
+                print("{}, {}, 0, 0,".format(start, end))
+                if end < start:
+                    fail("Request to get edgelist with invalid range {:x} - {:x}".format(start, end))
+                if start % 16 != 0:
+                    fail("start_address not aligned: {}".format(end))
+                if end % self.bytes_per_vertex != 0:
+                    fail("end_address not aligned: {}".format(end))
 
 
 #=======================================
