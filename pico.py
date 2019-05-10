@@ -134,7 +134,7 @@ class HMCPort(Record):
     @passive
     def gen_cmd(self):
         num_cycles = 0
-        logger = logging.getLogger('simulation.pico')
+        logger = logging.getLogger('sim.pico')
 
         while True:
             if random.choice([True, False]):
@@ -150,12 +150,15 @@ class HMCPort(Record):
                 size = (yield self.size)
                 tag = (yield self.tag)
                 cmd = (yield self.cmd)
+                end_addr = addr + size*16
+
                 logger.debug("{}: HMC request: {} tag={} addr=0x{:X} size={}".format(num_cycles, "read" if cmd == self.HMC_CMD_RD else "write", tag, addr, size))
                 assert addr % 16 == 0
                 assert size > 0
                 assert size <= 8
-                idx = addr >> 4
+                assert (addr >> 7) == ((end_addr-1) >> 7)
 
+                idx = addr >> 4
                 if cmd == self.HMC_CMD_RD:
                     self.cmd_inflight_r.append({'tag':tag, 'idx':idx, 'size':size})
                 elif cmd == self.HMC_CMD_WR:
@@ -388,6 +391,7 @@ class PicoPlatform(Module):
         self.hmc_addr_width = hmc_addr_width
         self.hmc_size_width = hmc_size_width
         self.hmc_data_width = hmc_data_width
+        self.submodules.logic = Module()
         if init:
             self.init_data = init
         if num_hmc_ports_required > 0 or create_hmc_ios:
@@ -411,12 +415,12 @@ class PicoPlatform(Module):
                 getattr(port, name).name_override = "hmc_{}_p{}".format(name, i)
             self.ios |= {getattr(port, name) for name in [x[0] for x in _hmc_port_layout]}
             self.picoHMCports.append(port)
-            self.comb += port.clk.eq(self.cd_sys.clk)
+            self.logic.comb += port.clk.eq(self.cd_sys.clk)
             if i >= num_hmc_ports_required:
                 for field, _, dir in _hmc_port_layout:
                     if field != "clk" and dir == DIR_M_TO_S:
                         s = getattr(port, field)
-                        self.comb += s.eq(0)
+                        self.logic.comb += s.eq(0)
 
         if num_hmc_ports_required <= 9:
             self.HMCports = self.picoHMCports
@@ -426,7 +430,7 @@ class PicoPlatform(Module):
             for i,port in enumerate(self.HMCports):
                 portgroups[i % 9].append(port)
             for i in range(9):
-                self.submodules += HMCPortMultiplexer(out_port=self.picoHMCports[i], in_ports=portgroups[i])
+                self.logic.submodules += HMCPortMultiplexer(out_port=self.picoHMCports[i], in_ports=portgroups[i])
 
 
     def ensureStreamClk(self):
@@ -463,7 +467,7 @@ class PicoPlatform(Module):
         assert self.bus.current_status_addr < 0x20000
         status_reg_pico = Signal.like(status_reg)
         self.specials += MultiReg(status_reg, status_reg_pico, odomain="bus")
-        self.sync.bus += [
+        self.logic.sync.bus += [
             If( self.bus.PicoRd & (self.bus.PicoAddr == self.bus.current_status_addr),
                 self.bus.PicoDataOut.eq(status_reg_pico)
             )
@@ -474,7 +478,7 @@ class PicoPlatform(Module):
         self.ensureBus()
         control_reg_pico = Signal.like(control_reg)
         self.specials += MultiReg(control_reg_pico, control_reg, odomain=odomain)
-        self.sync.bus += [
+        self.logic.sync.bus += [
             If( self.bus.PicoWr & (self.bus.PicoAddr == self.bus.current_control_addr),
                 control_reg_pico.eq(self.bus.PicoDataIn)
             )

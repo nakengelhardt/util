@@ -192,7 +192,7 @@ class GetEdgelistHMC(Module):
             if (yield self.req.valid) and (yield self.req.ack):
                 start = (yield self.req.start_address)
                 end = (yield self.req.end_address)
-                print("{}, {}, 0, 0,".format(start, end))
+                # print("{:#x}, {:#x}, 0, 0,".format(start, end))
                 if end < start:
                     fail("Request to get edgelist with invalid range {:x} - {:x}".format(start, end))
                 if start % 16 != 0:
