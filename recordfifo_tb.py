@@ -5,7 +5,7 @@ from migen import *
 from migen.genlib.record import *
 from recordfifo import RecordFIFO
 
-from tbsupport import *
+from ..tbsupport import *
 
 class FifoCase(SimCase, unittest.TestCase):
     class TestBench(Module):

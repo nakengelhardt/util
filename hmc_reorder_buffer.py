@@ -1,7 +1,7 @@
 from migen import *
 from migen.genlib.fifo import *
 
-from pico import HMCPort
+from .pico import HMCPort
 
 class HMCReorderBuffer(Module):
     def __init__(self, hmc_port):

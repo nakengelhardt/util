@@ -5,13 +5,13 @@ from migen.genlib.fifo import *
 from migen.fhdl import verilog
 import migen.build.xilinx.common
 
-from recordfifo import RecordFIFO
+from .recordfifo import RecordFIFO
 
 import random
 import logging
 import struct
 
-from misc import *
+from .misc import *
 
 
 @passive

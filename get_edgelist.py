@@ -2,9 +2,9 @@ from migen import *
 from migen.genlib.fifo import *
 from migen.genlib.fsm import *
 
-from hmc_reorder_buffer import HMCReorderBuffer
-from pico import HMCPort
-from recordfifo import InterfaceFIFO
+from .hmc_reorder_buffer import HMCReorderBuffer
+from .pico import HMCPort
+from .recordfifo import InterfaceFIFO
 
 class GetEdgelistHMC(Module):
     def __init__(self, port, vertex_size_in_bits=32):

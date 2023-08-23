@@ -1,7 +1,7 @@
 from migen import *
 from migen.fhdl import verilog
 
-from pico import PicoPlatform
+from .pico import PicoPlatform
 
 import unittest
 import logging
