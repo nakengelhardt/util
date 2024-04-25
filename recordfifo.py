@@ -2,6 +2,7 @@ from migen import *
 from migen.genlib.record import *
 from migen.genlib.fifo import _FIFOInterface, _inc, SyncFIFO, SyncFIFOBuffered
 
+from .mem import FullyInitMemory
 
 class InitFIFO(Module, _FIFOInterface):
     """Synchronous FIFO (first in, first out)
@@ -35,7 +36,7 @@ class InitFIFO(Module, _FIFOInterface):
 
         produce = Signal(max=depth, reset=startlevel)
         consume = Signal(max=depth)
-        storage = Memory(self.width, depth, init=init)
+        storage = FullyInitMemory(self.width, depth, init=init)
         self.specials += storage
 
         wrport = storage.get_port(write_capable=True, mode=READ_FIRST)

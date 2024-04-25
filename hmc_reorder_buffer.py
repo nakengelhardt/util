@@ -2,6 +2,7 @@ from migen import *
 from migen.genlib.fifo import *
 
 from .pico import HMCPort
+from .mem import FullyInitMemory
 
 class HMCReorderBuffer(Module):
     def __init__(self, hmc_port):
@@ -21,11 +22,11 @@ class HMCReorderBuffer(Module):
         tag_sz = hmc_port.effective_max_tag_size
         num_tags = 2**tag_sz
 
-        self.specials.reorder_buffer = Memory(width=len(hmc_port.rd_data), depth=num_tags*8)
+        self.specials.reorder_buffer = FullyInitMemory(width=len(hmc_port.rd_data), depth=num_tags*8)
         self.specials.wr_port = wr_port = self.reorder_buffer.get_port(write_capable=True, mode=READ_FIRST)
         self.specials.rd_port = rd_port = self.reorder_buffer.get_port(async_read=True, mode=READ_FIRST)
 
-        self.specials.size_buffer = Memory(width=len(hmc_port.size), depth=num_tags)
+        self.specials.size_buffer = FullyInitMemory(width=len(hmc_port.size), depth=num_tags)
         size_wr_port = self.size_buffer.get_port(write_capable=True, mode=READ_FIRST)
         size_rd_port = self.size_buffer.get_port(async_read=True, mode=READ_FIRST)
         size_tag_port = self.size_buffer.get_port(async_read=True, mode=READ_FIRST)
